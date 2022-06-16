@@ -387,6 +387,11 @@ err:
 	return ret;
 }
 
+void bch_journal_space_reserve(struct journal *j)
+{
+    j->do_reserve = true;
+}
+
 /* Journalling */
 #define journal_max_cmp(l, r) \
 	(fifo_idx(&c->journal.pin, btree_current_write(l)->journal) < \
@@ -507,6 +512,29 @@ static void do_journal_discard(struct cache *ca)
 	}
 }
 
+static unsigned int free_journal_buckets(struct cache_set *c)
+{
+	struct journal *j = &c->journal;
+	//struct cache *ca = c->cache;
+	struct cache *ca;
+	struct journal_device *ja;
+	unsigned iter;
+        for_each_cache(ca, c, iter) {
+	    ja = &ca->journal;
+	    unsigned int n;
+
+	    /* In case njournal_buckets is not power of 2 */
+	    if (ja->cur_idx >= ja->discard_idx)
+		    n = ca->sb.njournal_buckets + ja->discard_idx - ja->cur_idx;
+	    else
+		    n = ja->discard_idx - ja->cur_idx;
+
+	    if (n > (1 + j->do_reserve))
+		return n - (1 + j->do_reserve);
+
+	}
+	return 0;
+}
 static void journal_reclaim(struct cache_set *c)
 {
 	struct bkey *k = &c->journal.key;
@@ -546,23 +574,25 @@ static void journal_reclaim(struct cache_set *c)
 
 	for_each_cache(ca, c, iter) {
 		struct journal_device *ja = &ca->journal;
-		unsigned next = (ja->cur_idx + 1) % ca->sb.njournal_buckets;
+		//unsigned next = (ja->cur_idx + 1) % ca->sb.njournal_buckets;
 
 		/* No space available on this device */
-		if (next == ja->discard_idx)
-			continue;
+		//if (next == ja->discard_idx)
+		//	continue;
+                if (!free_journal_buckets(c))
+                        goto out;
 
-		ja->cur_idx = next;
-		k->ptr[n++] = MAKE_PTR(0,
+		//ja->cur_idx = next;
+		ja->cur_idx = (ja->cur_idx + 1) % ca->sb.njournal_buckets;
+		k->ptr[0] = MAKE_PTR(0,
 				  bucket_to_sector(c, ca->sb.d[ja->cur_idx]),
 				  ca->sb.nr_this_dev);
 	}
 
-	if (n) {
-		bkey_init(k);
-		SET_KEY_PTRS(k, n);
-		c->journal.blocks_free = c->sb.bucket_size >> c->block_bits;
-	}
+	bkey_init(k);
+	SET_KEY_PTRS(k, n);
+	c->journal.blocks_free = c->sb.bucket_size >> c->block_bits;
+	
 out:
 	if (!journal_full(&c->journal))
 		__closure_wake_up(&c->journal.wait);
